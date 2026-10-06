@@ -1,15 +1,30 @@
+// Special headers for RuStore API
+const SPECIAL_HEADERS = {
+    'ruStoreVerCode': '1105001'
+};
+
 // Android SDK version mapping
-const sdkVersions = {
+const sdkExceptions = {
     1:  '1.0',   2:  '1.1',   3:  '1.5',   4:  '1.6',   5:  '2.0',  6:  '2.0.1',
     7:  '2.1',   8:  '2.2',   9:  '2.3',   10: '2.3.3', 11: '3.0',  12: '3.1',
     13: '3.2',   14: '4.0',   15: '4.0.3', 16: '4.1',   17: '4.2',  18: '4.3',
     19: '4.4',   20: '4.4W',  21: '5.0',   22: '5.1',   23: '6.0',  24: '7.0',
-    25: '7.1',   26: '8.0',   27: '8.1',   28: '9.0',   29: '10',   30: '11',
-    31: '12',    32: '12.1',  33: '13',    34: '14',    35: '15',   36: '16'
+    25: '7.1',   26: '8.0',   27: '8.1',   32: '12.1'
 }; // https://en.wikipedia.org/wiki/Android_version_history
 
 // Utility functions
-const getAndroidVersion = sdk => sdkVersions[sdk] ? `Android ${sdkVersions[sdk]}` : `API ${sdk}`;
+const getAndroidVersion = sdk => {
+    const num = Number(sdk);
+
+    // SDK 28-31: Android 9-12 (SDK version = Android version + 19)
+    // SDK 33+:   Android 13+  (SDK version = Android version + 20)
+    if (sdkExceptions[sdk]) return `Android ${sdkExceptions[sdk]}`;
+    if (num >= 28 && num <= 31) return `Android ${num - 19}`;
+    if (num >= 33) return `Android ${num - 20}`;
+
+    return `API ${sdk}`;
+};
+
 const formatFileSize = bytes => {
     if (bytes === 0) return '0 Bytes';
     const sizes = ['Bytes', 'KB', 'MB', 'GB'];
@@ -19,16 +34,21 @@ const formatFileSize = bytes => {
 const formatDate = date => new Date(date).toLocaleDateString();
 const roundToDecimal = (num, places = 2) => Math.round(num * 10**places) / 10**places;
 
+const lockScroll = () => document.body.style.overflow = 'hidden';
+const unlockScroll = () => document.body.style.overflow = '';
+
 const createRatingStars = rating => {
     const fullStars = Math.floor(rating);
     const hasHalfStar = rating % 1 >= 0.5;
-    return Array.from({length: 5}, (_, i) => 
-        i < fullStars 
-            ? '<span class="rating-star">★</span>' 
-            : (i === fullStars && hasHalfStar) 
-                ? '<span class="rating-star">⯪</span>' 
-                : '<span class="text-gray-300">★</span>'
-    ).join('');
+    return Array.from({length: 5}, (_, i) => {
+        if (i < fullStars) {
+            return '<span class="rating-star">★</span>';
+        } else if (i === fullStars && hasHalfStar) {
+            return '<span class="rating-star-half"><span class="rating-star-bg">★</span><span class="rating-star-fg">★</span></span>';
+        } else {
+            return '<span class="text-gray-300">★</span>';
+        }
+    }).join('');
 };
 
 // Modal Management
@@ -40,12 +60,14 @@ const ModalManager = {
         }
         modal.classList.remove('hidden');
         modal.classList.add('show');
+        lockScroll();
     },
 
     hide(modalId, contentId) {
         const modal = document.getElementById(modalId);
         modal.classList.add('hidden');
         modal.classList.remove('show');
+        unlockScroll();
         if (contentId) {
             document.getElementById(contentId).innerHTML = '';
         }
@@ -70,7 +92,7 @@ const state = {
     isLoading: false,
     hasMorePages: true,
     query: '',
-    
+
     reset() {
         if (this.controller) this.controller.abort();
         this.controller = new AbortController();
@@ -80,10 +102,11 @@ const state = {
 };
 
 // API functions
-async function searchApps(query, isLoadMore = false) {
+async function searchApps(query, deviceType, isLoadMore = false) {
     if (!isLoadMore) {
         state.reset();
         state.query = query;
+        state.deviceType = deviceType;
         state.isLoading = false;  // Reset loading state for new search
     }
 
@@ -97,21 +120,25 @@ async function searchApps(query, isLoadMore = false) {
     state.isLoading = true;
 
     try {
-        const response = await fetch(`https://backapi.rustore.ru/applicationData/apps?pageNumber=${state.page}&pageSize=20&query=${encodeURIComponent(query.trim())}`, {
-            signal: state.controller.signal
+        const response = await fetch(`/api/applicationData/apps?pageNumber=${state.page}&pageSize=20&query=${encodeURIComponent(query.trim())}`, {
+            signal: state.controller.signal,
+            headers: { 'deviceType': deviceType }
         });
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+
         const data = await response.json();
-        
+
         // Check if this is still the current query
-        if (query !== state.query) {
+        if (query !== state.query || deviceType !== state.deviceType) {
             return;
         }
-        
+
         if (data.code === 'OK') {
             const results = data.body.content;
-            
-            if (!isLoadMore) resultsContainer.innerHTML = '';
-            
+
             if (results.length === 0) {
                 if (!isLoadMore) {
                     resultsContainer.innerHTML = '<div class="col-span-full text-center p-4"><p class="text-gray-600">No apps found</p></div>';
@@ -119,36 +146,54 @@ async function searchApps(query, isLoadMore = false) {
                 state.hasMorePages = false;
                 return;
             }
-            
+
             for (const app of results) {
-                // Check if query has changed before processing each app
-                if (query !== state.query) {
+                // Check if query or deviceType has changed before processing each app
+                if (query !== state.query || deviceType !== state.deviceType) {
                     return;
                 }
-                const appDetails = await fetchAppDetails(app.packageName, { signal: state.controller.signal });
-                if (appDetails) resultsContainer.appendChild(createAppCard(appDetails, app));
+                const appDetails = await fetchAppDetails(app.packageName, deviceType, { signal: state.controller.signal });
+                if (appDetails) {
+                    if (!isLoadMore && !resultsContainer.querySelector('.app-card')) {
+                        resultsContainer.innerHTML = '';
+                    }
+                    resultsContainer.appendChild(createAppCard(appDetails, app));
+                }
+            }
+
+            if (!isLoadMore && !resultsContainer.querySelector('.app-card')) {
+                ModalManager.showError('searchResults', 'Search Error', 'Failed to load app details');
+                return;
             }
 
             state.hasMorePages = state.page < data.body.totalPages - 1;
             state.page++;
+        } else if (!isLoadMore) {
+            ModalManager.showError('searchResults', 'Search Error', data.message || 'Failed to search applications');
         }
     } catch (error) {
         if (error.name !== 'AbortError') {
             console.error('Error searching apps:', error);
-            if (!isLoadMore && query === state.query) {
-                ModalManager.showError('searchResults', 'Unable to connect to the server', 'Please check your internet connection and try again');
+            if (!isLoadMore && query === state.query && deviceType === state.deviceType) {
+                ModalManager.showError('searchResults', 'Search Error', error.message || 'Failed to fetch search results');
             }
         }
     } finally {
-        if (query === state.query) {
+        if (query === state.query && deviceType === state.deviceType) {
             state.isLoading = false;
         }
     }
 }
 
-async function fetchAppDetails(packageName, { signal } = {}) {
+async function fetchAppDetails(packageName, deviceType, { signal } = {}) {
     try {
-        const response = await fetch(`https://backapi.rustore.ru/applicationData/overallInfo/${packageName}`, { signal });
+        const response = await fetch(`/api/applicationData/overallInfo/${packageName}`, {
+            signal,
+            headers: {
+                ...SPECIAL_HEADERS,
+                'deviceType': deviceType,
+            }
+        });
         const data = await response.json();
         return data.code === 'OK' ? data.body : null;
     } catch (error) {
@@ -161,19 +206,27 @@ async function fetchAppDetails(packageName, { signal } = {}) {
 function createAppCard(appDetails, app) {
     const screenshots = appDetails.fileUrls.sort((a, b) => a.ordinal - b.ordinal);
     
-    // Escape special characters in the description
-    const escapedDescription = appDetails.fullDescription
+    // Normalize \n to real newlines, then escape for HTML attr and JS string
+    const normalizedDescription = appDetails.fullDescription
+        .replace(/\\n/g, '\n')
+        .replace(/\\r/g, '\r')
+        .replace(/\\t/g, '\t');
+    const escapedDescription = normalizedDescription
         .replace(/\\/g, '\\\\')
         .replace(/'/g, "\\'")
         .replace(/\n/g, '\\n')
         .replace(/\r/g, '\\r')
-        .replace(/\t/g, '\\t');
+        .replace(/\t/g, '\\t')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
     
     return Object.assign(document.createElement('div'), {
         className: 'app-card p-4 flex flex-col justify-between h-full',
         innerHTML: `
             <div class="flex items-start gap-4">
-                <img src="${appDetails.iconUrl}" alt="${appDetails.appName}" class="w-20 h-20 rounded-lg">
+                <img src="${appDetails.iconUrl}" alt="${appDetails.appName}" class="w-20 h-20 rounded-lg" loading="lazy">
                 <div class="flex-1 flex flex-col min-w-0">
                     <h2 class="text-xl font-bold break-words whitespace-normal w-full">${appDetails.appName}</h2>
                     <p class="text-gray-600 break-words whitespace-normal max-w-full" title="${appDetails.packageName}">${appDetails.packageName}</p>
@@ -187,12 +240,12 @@ function createAppCard(appDetails, app) {
             </div>
             
             <div class="mt-4">
-                <p class="text-gray-700">${appDetails.shortDescription}</p>
+                <p class="text-gray-700 whitespace-pre-wrap">${appDetails.shortDescription.replace(/\\n/g, '\n').trim()}</p>
                 <button class="description-toggle mt-2" onclick="showDescription('${appDetails.appName}', '${escapedDescription}')">Show full description</button>
             </div>
             
             <div class="screenshots-container my-4">
-                ${screenshots.map(s => `<img src="${s.fileUrl}" alt="Screenshot" class="w-40 cursor-pointer rounded shadow" onclick="openPreview('${s.fileUrl}', event)">`).join('')}
+                ${screenshots.map(s => `<img src="${s.fileUrl}" alt="Screenshot" class="w-40 cursor-pointer rounded shadow" onclick="openPreview('${s.fileUrl}', event)" loading="lazy">`).join('')}
             </div>
             
             <div class="grid grid-cols-2 gap-2 text-sm text-gray-600">
@@ -220,7 +273,7 @@ async function showVersionHistory(appId) {
     ModalManager.show('versionModal', 'versionHistory', '<div class="text-center p-4"><p class="text-gray-600">Loading version history...</p></div>');
     
     try {
-        const response = await fetch(`https://backapi.rustore.ru/applicationData/allAppVersionWhatsNew/${appId}`);
+        const response = await fetch(`/api/applicationData/allAppVersionWhatsNew/${appId}`);
         const data = await response.json();
         
         if (data.code === 'OK') {
@@ -244,41 +297,56 @@ async function showVersionHistory(appId) {
 async function downloadApp(appId, sdkVersion) {
     ModalManager.show('downloadModal', 'downloadResults', '<div class="text-center p-4"><p class="text-gray-600">Obtaining download link...</p></div>');
 
-    try {
-        const response = await fetch('https://backapi.rustore.ru/applicationData/v2/download-link', {
+    const modalTitle = document.querySelector('#downloadModal h2');
+    if (modalTitle) modalTitle.textContent = 'Download';
+
+    const fetchApi = async (url, bodyData) => {
+        const response = await fetch(url, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ 
-                "appId": appId,
-                "firstInstall": true,   // can be true or false (no difference)
-                "mobileServices": [],   // optional
-                "supportedAbis": [	    // optional
-                    "x86_64",
-                    "arm64-v8a",
-                    "x86",
-                    "armeabi-v7a",
-                    "armeabi"
-                ],
-                "screenDensity": 0,     // TODO: fix, currently set to 0
-                "supportedLocales": [   // optional
-                    "ru_RU"
-                ],
-                "sdkVersion": sdkVersion,
-                "withoutSplits": true,
-                "signatureFingerprint": null
-            })
+            headers: {
+                'Content-Type': 'application/json',
+                ...SPECIAL_HEADERS,
+                'deviceType': state.deviceType,
+            },
+            body: JSON.stringify(bodyData)
         });
 
         if (!response.ok) {
-            // Trying to parse the error body
             const errBody = await response.json().catch(() => ({}));
             throw new Error(`HTTP ${response.status}: ${errBody.message || 'Unknown error'}`);
         }
 
-        const data = await response.json();
+        return response.json();
+    };
 
-        if (data.code !== 'OK') {
-            throw new Error(data.message || 'Server returned error');
+    const replaceZipToApk = (urls) => {
+        urls?.forEach(item => {
+            if (item?.url) item.url = item.url.replace(/\.zip$/, '.apk');
+        });
+    };
+
+    try {
+        let data = await fetchApi('/api/v3/showcase/apps/download-link', { appId });
+
+        if (data?.downloadUrls?.length > 0) {
+            replaceZipToApk(data.downloadUrls);
+        } else {
+            data = await fetchApi('/api/applicationData/v2/download-link', {
+                appId,
+                screenDensity: 300,
+                sdkVersion,
+                withoutSplits: false,
+                supportedAbis: ["x86_64", "arm64-v8a", "x86", "armeabi-v7a", "armeabi"]
+            });
+
+            if (data?.body?.downloadUrls?.length > 0) {
+                if (modalTitle) modalTitle.textContent = 'Download (Split APK)';
+                replaceZipToApk(data.body.downloadUrls);
+            }
+        }
+
+        if (!data?.downloadUrls?.length && !data?.body?.downloadUrls?.length) {
+            throw new Error(data.message || 'Download URLs not found in both responses');
         }
 
         document.getElementById('downloadResults').innerHTML = JSON.stringify(data, null, 4).replace(
@@ -287,23 +355,24 @@ async function downloadApp(appId, sdkVersion) {
         );
     } catch (error) {
         console.error('Error downloading app:', error);
-        ModalManager.showError('downloadResults', 'Unable to obtain download URLs', 'Please try again');
+        ModalManager.showError('downloadResults', 'Unable to obtain download URLs', error.message);
     }
 }
 
 function showDescription(appName, description) {
     const modal = document.getElementById('descriptionModal');
     const content = document.getElementById('descriptionContent');
-    
+
     // Set the app name as the modal title
     modal.querySelector('h2').textContent = `${appName} - Description`;
-    
+
     // Set the description content
     content.textContent = description;
-    
+
     // Show the modal
     modal.classList.remove('hidden');
     modal.classList.add('show');
+    lockScroll();
 }
 
 async function showComments(packageName, pageNumber, firstOpen) {
@@ -319,7 +388,7 @@ async function showComments(packageName, pageNumber, firstOpen) {
 
     try {
         const filterOption = document.getElementById('commentsFilterOption').value;
-        const response = await fetch(`https://backapi.rustore.ru/comment/comment?packageName=${packageName}&sortBy=${filterOption}&pageNumber=${pageNumber}&pageSize=20`);
+        const response = await fetch(`/api/comment/comment?packageName=${packageName}&sortBy=${filterOption}&pageNumber=${pageNumber}&pageSize=20`);
         const data = await response.json();
         
         if (data.code === 'OK') {
@@ -402,13 +471,14 @@ function openPreview(imageUrl, event) {
     const modal = document.getElementById('imagePreviewModal');
     const currentCard = event.target.closest('.app-card');
     const screenshots = Array.from(currentCard.querySelectorAll('.screenshots-container img'));
-    
+
     state.images = screenshots.map(img => img.src);
     state.imageIndex = state.images.indexOf(imageUrl);
-    
+
     document.getElementById('previewImage').src = imageUrl;
     modal.classList.remove('hidden');
     modal.classList.add('show');
+    lockScroll();
     modal.focus();
     modal.setAttribute('tabindex', '0');
     
@@ -440,6 +510,7 @@ function closeImagePreview() {
     const modal = document.getElementById('imagePreviewModal');
     modal.classList.add('hidden');
     modal.classList.remove('show');
+    unlockScroll();
     modal.removeAttribute('tabindex');
     state.images = [];
     state.imageIndex = 0;
@@ -451,13 +522,22 @@ document.addEventListener('DOMContentLoaded', () => {
     const searchInput = document.getElementById('searchInput');
     const clearButton = document.getElementById('clearSearch');
     let searchTimeout;
-    
+
+    const getDeviceType = () => document.querySelector('input[name="deviceType"]:checked').value;
+
     searchInput.addEventListener('input', (e) => {
         clearTimeout(searchTimeout);
-        searchTimeout = setTimeout(() => searchApps(e.target.value), 500);
-        
+        searchTimeout = setTimeout(() => searchApps(e.target.value, getDeviceType()), 500);
+
         // Show/hide clear button based on input value
         clearButton.classList.toggle('hidden', !e.target.value);
+    });
+
+    // Device type radio buttons - trigger new search on change
+    document.querySelectorAll('input[name="deviceType"]').forEach(radio => {
+        radio.addEventListener('change', () => {
+            if (state.query) searchApps(state.query, getDeviceType());
+        });
     });
 
     // Clear input and hide button when clicked
@@ -472,7 +552,7 @@ document.addEventListener('DOMContentLoaded', () => {
         state.query = '';
         state.isLoading = false;
     });
-    
+
     // Modal event listeners
     document.querySelectorAll('.modal-close').forEach(closeBtn => {
         closeBtn.onclick = () => {
@@ -520,7 +600,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const scrollPosition = window.innerHeight + window.scrollY;
         const pageHeight = document.documentElement.scrollHeight;
         if (scrollPosition >= pageHeight - 200) {
-            searchApps(state.query, true);
+            searchApps(state.query, state.deviceType, true);
         }
     });
 });
